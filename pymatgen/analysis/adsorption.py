@@ -33,13 +33,13 @@ from matplotlib import patches
 from matplotlib.path import Path
 
 __author__ = "Joseph Montoya"
-__copyright__ = "Copyright 2016, The Materials Project"
-__version__ = "0.1"
-__maintainer__ = "Joseph Montoya"
+__copyright__ = "Copyright 2017, The Materials Project"
+__version__ = "0.2"
+__maintainer__ = "Joseph Montoya, Michael T Tang"
 __credits__ = "Richard Tran"
 __email__ = "montoyjh@lbl.gov"
 __status__ = "Development"
-__date__ = "December 2, 2015"
+__date__ = "June 21, 2017"
 
 class AdsorbateSiteFinder(object):
     """
@@ -231,7 +231,8 @@ class AdsorbateSiteFinder(object):
     def find_adsorption_sites(self, distance = 2.0, put_inside = True,
                               symm_reduce = 1e-2, near_reduce = 1e-2,
                               positions = ['ontop', 'bridge', 'hollow'],
-                              no_obtuse_hollow = True):
+                              no_obtuse_hollow = True, z_oriented = False,
+                              make_profile_dict = True, radial_reduce = False):
         """
         Finds surface sites according to the above algorithm.  Returns
         a list of corresponding cartesian coordinates.
@@ -251,10 +252,18 @@ class AdsorbateSiteFinder(object):
                 "subsurface": subsurface positions projected into miller plane
             no_obtuse_hollow (bool): flag to indicate whether to include
                 obtuse triangular ensembles in hollow sites
+            z_oriented (bool): flag to indicate that the input slab has already been 
+            reoriented in the z-direction
+            make_profile_dict (bool): flag to make profiles about the sites generated
+            radial_reduce (bool): reduce possible sites based on distance from existing sites
         """
         ads_sites = {k:[] for k in positions}
+        if make_profile_dict:
+            site_profile = {k:[] for k in positions} #for gathering vertice info of ads sites created 
         if 'ontop' in positions:
             ads_sites['ontop'] = [s.coords for s in self.surface_sites]
+            if make_profile_dict:
+                site_profile['ontop'] = [[site,str(site.specie),site.coord] for site in self.surface_sites]
         if 'subsurface' in positions:
             # Get highest site
             ref = self.slab.sites[np.argmax(self.slab.cart_coords[:, 2])]        
@@ -262,10 +271,15 @@ class AdsorbateSiteFinder(object):
             ss_sites = [self.mvec*np.dot(ref.coords-s.coords, self.mvec)
                         + s.coords for s in self.subsurface_sites()]
             ads_sites['subsurface'] = ss_sites
+            if make_profile_dict:
+                site_profile['subsurface'] = [[site,str(site.specie),site.coord] for site in ss_sites]
         if 'bridge' in positions or 'hollow' in positions:
             mesh = self.get_extended_surface_mesh()
-            sop = get_rot(self.slab)
-            dt = Delaunay([sop.operate(m.coords)[:2] for m in mesh])
+            if not z_oriented: #reorient the input slab if it hasn't been reoriented in the z.
+                sop = get_rot(self.slab)
+                dt = Delaunay([sop.operate(m.coords)[:2] for m in mesh])
+            else:
+                dt = Delaunay([m.coords[:2] for m in mesh])
             # TODO: refactor below to properly account for >3-fold
             for v in dt.simplices:
                 if -1 not in v:
@@ -279,32 +293,82 @@ class AdsorbateSiteFinder(object):
                         if 'bridge' in positions:
                             ads_sites["bridge"].append(
                                     self.ensemble_center(mesh, opp))
+                            if make_profile_dict:
+                                site_profile['bridge'].append([[mesh[d],
+                                                            str(mesh[d].specie),
+                                                            mesh[d].coord] for d in opp])
                     # Prevent addition of hollow sites in obtuse triangles
                     obtuse = no_obtuse_hollow and (np.array(dots) < 1e-5).any()
                     # Add hollow sites at centers of D. Tri faces
                     if 'hollow' in positions and not obtuse:
                         ads_sites['hollow'].append(
                                 self.ensemble_center(mesh, v))
-        ads_sites['all'] = sum(ads_sites.values(), [])
-        for key, sites in ads_sites.items():
-            # Pare off outer sites for bridge/hollow
-            if key in ['bridge', 'hollow']:
-                frac_coords = [cart_to_frac(self.slab.lattice, ads_site) 
-                               for ads_site in sites]
-                frac_coords = [frac_coord for frac_coord in frac_coords 
+                        if make_profile_dict:
+                            site_profile['hollow'].append([[mesh[i],
+                                                        str(mesh[i].specie),
+                                                        mesh[i].coord] for i in v])
+
+
+        #ads_sites['all'] = sum(ads_sites.values(), [])
+        
+        if z_oriented: #recalculate mvec for input slabs that have been reoriented
+            mvec = np.cross(self.slab.lattice.matrix[0], self.slab.lattice.matrix[1])
+            self.mvec = mvec / np.linalg.norm(mvec)
+            if self.mvec[2]<0:
+                self.mvec=-self.mvec
+            
+        if make_profile_dict:
+            for key, sites in ads_sites.items():
+                # Pare off outer sites for bridge/hollow
+                if key in ['bridge', 'hollow']:
+                    frac_coords = [cart_to_frac(self.slab.lattice, ads_site) 
+                                   for ads_site in sites]
+                    frac_coords = [[frac_coord,profile] for frac_coord,profile in zip(frac_coords,site_profile[key])
                                if (frac_coord[0]>1 and frac_coord[0]<4
                                and frac_coord[1]>1 and frac_coord[1]<4)]
-                sites = [frac_to_cart(self.slab.lattice, frac_coord) 
-                        for frac_coord in frac_coords]
-            if near_reduce:
-                sites = self.near_reduce(sites, threshold=near_reduce)
-            if put_inside:
-                sites = [put_coord_inside(self.slab.lattice, coord)
-                         for coord in sites]
-            if symm_reduce:
-                sites = self.symm_reduce(sites, threshold=symm_reduce)
-            sites = [site + distance*self.mvec for site in sites]
-            ads_sites[key] = sites
+                    profiles = [row[1] for row in frac_coords]
+                    frac_coords = [row[0] for row in frac_coords]
+                    sites = [frac_to_cart(self.slab.lattice, frac_coord) 
+                            for frac_coord in frac_coords]
+                    z_distance = distance * np.cos(2*np.pi/12) #30degrees angle from the ontop distance from surface atom centers
+
+                if near_reduce:
+                    sites,profiles = self.set_near_reduce(sites, profiles, threshold=near_reduce)
+                if put_inside:
+                    sites = [[put_coord_inside(self.slab.lattice, coord),profile]
+                             for coord,profile in zip(sites,profiles)]
+                    profiles = [row[1] for row in sites]
+                    sites = [row[0] for row in sites]
+                if symm_reduce:
+                    sites,profiles = self.set_symm_reduce(sites, profiles, threshold=symm_reduce) 
+                sites = [site + z_distance*self.mvec for site in sites]
+                if radial_reduce:
+                    sites,profiles = self.set_radial_reduce(sites, profiles, threshold=radial_reduce) 
+                ads_sites[key] = sites
+                site_profile[key] = profiles
+            self.sites = ads_sites
+            self.profiles = site_profile
+        else:
+            for key, sites in ads_sites.items():
+                # Pare off outer sites for bridge/hollow
+                if key in ['bridge', 'hollow']:
+                    frac_coords = [cart_to_frac(self.slab.lattice, ads_site) 
+                                   for ads_site in sites]
+                    frac_coords = [frac_coord for frac_coord in frac_coords 
+                                   if (frac_coord[0]>1 and frac_coord[0]<4
+                                   and frac_coord[1]>1 and frac_coord[1]<4)]
+                    sites = [frac_to_cart(self.slab.lattice, frac_coord) 
+                            for frac_coord in frac_coords]
+                if near_reduce:
+                    sites = self.near_reduce(sites, threshold=near_reduce)
+                if put_inside:
+                    sites = [put_coord_inside(self.slab.lattice, coord)
+                             for coord in sites]
+                if symm_reduce:
+                    sites = self.symm_reduce(sites, threshold=symm_reduce)
+                sites = [site + distance*self.mvec for site in sites]
+                ads_sites[key] = sites
+        
         return ads_sites
 
     def symm_reduce(self, coords_set, threshold = 1e-6):
@@ -353,6 +417,87 @@ class AdsorbateSiteFinder(object):
                 unique_coords += [coord]
         return [frac_to_cart(self.slab.lattice, coords) 
                 for coords in unique_coords]
+    
+    def set_near_reduce(self, coords_set, profile_set, threshold = 1e-4):
+        """
+        Prunes coordinate set and profile set for coordinates that are within 
+        threshold
+        
+        Args:
+            coords_set (Nx3 array-like): list or array of coordinates
+            profile_set (list): profile set for each coord in coords_set (ordered by zip)
+            threshold (float): threshold value for distance
+        """
+        unique_coords = []
+        unique_profile = []
+        coords_set = [cart_to_frac(self.slab.lattice, coords) 
+                      for coords in coords_set]
+        for coord,profile in zip(coords_set,profile_set):
+            if not in_coord_list_pbc(unique_coords, coord, threshold):
+                unique_coords += [coord]
+                unique_profile += [profile]
+        return [frac_to_cart(self.slab.lattice, coords) 
+                for coords in unique_coords],unique_profile
+
+    def set_radial_reduce(self, coords_set, profile_set, threshold = 3.5):
+        """
+        Prunes coordinate set and profile set for coordinates that are within 
+        threshold
+        
+        Args:
+            coords_set (Nx3 array-like): list or array of coordinates
+            profile_set (list): profile set for each coord in coords_set (ordered by zip)
+            threshold (float): threshold value for distance
+        """
+        passing_coords = []
+        passing_profile = []
+        coords_set = [cart_to_frac(self.slab.lattice, coords) 
+              for coords in coords_set]
+        for coord,profile in zip(coords_set,profile_set):
+            sites = [val[1] for val in profile]
+            active_site_struct = Structure.from_sites(sites)
+            distance = sum([np.linalg.norm(distance) 
+                            for distance 
+                            in active_site_struct.distance_matrix])/len([np.linalg.norm(distance) 
+                                                                         for distance in 
+                                                                         active_site_struct.distance_matrix])
+            if distance < threshold:
+                passing_coords += [coord]
+                passing_profile += [profile]
+        return [frac_to_cart(self.slab.lattice, coords) 
+                for coords in passing_coords],passing_profile
+    
+    def set_symm_reduce(self, coords_set, profile_set, threshold = 1e-6):
+        """
+        Reduces the set of adsorbate sites and profile set by finding removing
+        symmetrically equivalent duplicates
+
+        Args:
+            coords_set: coordinate set in cartesian coordinates
+            profile_set: profile set for each coord in coords_set (ordered by zip)
+            threshold: tolerance for distance equivalence, used
+                as input to in_coord_list_pbc for dupl. checking
+        """
+        surf_sg = SpacegroupAnalyzer(self.slab, 0.1)
+        symm_ops = surf_sg.get_symmetry_operations()
+        unique_coords = []
+        unique_profile = []
+        # Convert to fractional
+        coords_set = [cart_to_frac(self.slab.lattice, coords) 
+                      for coords in coords_set]
+        for coords,profile in zip(coords_set,profile_set):
+            incoord = False
+            for op in symm_ops:
+                if in_coord_list_pbc(unique_coords, op.operate(coords), 
+                                     atol = threshold):
+                    incoord = True
+                    break
+            if not incoord:
+                unique_coords += [coords]
+                unique_profile += [profile]
+        # convert back to cartesian
+        return [frac_to_cart(self.slab.lattice, coords) 
+                for coords in unique_coords],unique_profile
 
     def ensemble_center(self, site_list, indices, cartesian = True):
         """
@@ -401,6 +546,9 @@ class AdsorbateSiteFinder(object):
         if 'selective_dynamics' in struct.site_properties.keys():
             molecule.add_site_property("selective_dynamics",
                                        [[True, True, True]] * molecule.num_sites)
+        if 'layers' in struct.site_properties.keys():
+                molecule.add_site_property("layers",
+                                           [-1] * molecule.num_sites)
         for site in molecule:
             struct.append(site.specie, ads_coord + site.coords, coords_are_cartesian = True,
                           properties = site.properties)
@@ -443,9 +591,11 @@ class AdsorbateSiteFinder(object):
             yrep = np.ceil(min_lw / np.linalg.norm(self.slab.lattice.matrix[1]))
             repeat = [xrep, yrep, 1]
         structs = []
-        for coords in self.find_adsorption_sites(**find_args)['all']:
-            structs.append(self.add_adsorbate(
-                molecule, coords, repeat=repeat, reorient=reorient))
+        #'key' meaning: ontop, bridge, hollow...
+        for key,key_coords in self.find_adsorption_sites(**find_args).items():
+            for coords in key_coords:
+                structs.append(self.add_adsorbate(
+                    molecule, coords, repeat=repeat, reorient=reorient))
         return structs
 
 def get_mi_vec(slab):
