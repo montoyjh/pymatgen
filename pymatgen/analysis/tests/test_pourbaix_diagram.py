@@ -276,6 +276,38 @@ class PourbaixDiagramTest(unittest.TestCase):
         self.assertAlmostEqual(pbx.get_decomposition_energy(custom_ion_entry, 5, 2),
                                2.1209002582, 1)
 
+    @unittest.skipIf(not SETTINGS.get("PMG_MAPI_KEY"),
+                     "PMG_MAPI_KEY environment variable not set.")
+    def test_heavy(self):
+        from pymatgen import MPRester
+        import time
+        from pymatgen.analysis.pourbaix_diagram import ELEMENTS_HO
+        import matplotlib
+        matplotlib.use('Agg')
+
+        # Set up rester
+        mpr = MPRester()
+        entry = mpr.get_entries("mp-1215061")[0]
+        composition = entry.composition
+        comp_dict = {str(key): value for key, value in composition.items()
+                     if key not in ELEMENTS_HO}
+
+        # Get data
+        fetch_start = time.time()
+        data = mpr.get_pourbaix_entries(list(comp_dict.keys()))
+        fetch_elapsed = time.time() - fetch_start
+        print("Fetch takes {} seconds".format(fetch_elapsed))
+        entry = [entry for entry in data if entry.entry_id == "mp-1215061"][0]
+
+        # Construct pourbaix diagram
+        construct_start = time.time()
+        pbx = PourbaixDiagram(data, comp_dict=comp_dict, filter_solids=False)
+        construct_elapsed = time.time() - construct_start
+        print("Construct takes {} seconds".format(construct_elapsed))
+        # Get entry
+        PourbaixPlotter(pbx).plot_entry_stability(entry, label_domains=False).savefig(
+            "high_pourbaix.png")
+
 
 class PourbaixPlotterTest(unittest.TestCase):
     def setUp(self):
