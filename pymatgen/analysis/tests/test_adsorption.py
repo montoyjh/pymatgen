@@ -154,7 +154,7 @@ class AdsorbateSiteFinderTest(PymatgenTest):
                 self.assertEqual(len(adslabs), 1)
 
             # Test out whether it can correctly dope both
-            # sides. Avoid (111) becasue it is not symmetric
+            # sides. Avoid (111) because it is not symmetric
             if tuple(slab.miller_index) != (1, 1, 1):
                 adslabs = adsgen.generate_substitution_structures("Ni", sub_both_sides=True,
                                                                   target_species=["Mg"])
@@ -177,6 +177,29 @@ class AdsorbateSiteFinderTest(PymatgenTest):
         slab = self.slab_dict["111"]
         rot = get_rot(slab)
         reoriented = reorient_z(slab)
+
+    def test_bug(self):
+        au_structure = Structure.from_spacegroup("225", Lattice.cubic(4.3), ["Au"], [[0, 0, 0]])
+        struct = SpacegroupAnalyzer(au_structure).get_conventional_standard_structure()
+        slabs = generate_all_slabs(struct, max_index=1, min_slab_size=8.0, min_vacuum_size=15.0)
+        slab_111 = [slab for slab in slabs if slab.miller_index == (1, 1, 1)][0]
+        big_slab_111 = slab_111.copy()
+        big_slab_111.make_supercell([[3, 0, 0], [0, 3, 0], [0, 0, 1]])
+        sites = AdsorbateSiteFinder(big_slab_111).find_adsorption_sites()
+        sga = SpacegroupAnalyzer(slab_111)
+        big_sga = SpacegroupAnalyzer(big_slab_111)
+        self.assertEqual(len(sites['all']), 4)
+        import nose; nose.tools.set_trace()
+        import matplotlib
+        matplotlib.use("Agg")
+        from matplotlib import pyplot as plt
+        fig = plt.figure()
+        ax = fig.add_subplot(111)
+        plot_slab(big_slab_111, ax=ax, adsorption_sites=True)
+        plt.savefig("slab_111.png")
+
+
+
 
 
 if __name__ == '__main__':

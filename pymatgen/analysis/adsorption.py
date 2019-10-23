@@ -16,6 +16,7 @@ from monty.serialization import loadfn
 from scipy.spatial import Delaunay
 
 from pymatgen.core.operations import SymmOp
+from pymatgen.core.periodic_table import DummySpecie
 from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
 from pymatgen.util.coord import in_coord_list_pbc
 from pymatgen.analysis.local_env import VoronoiNN
@@ -313,24 +314,22 @@ class AdsorbateSiteFinder:
             threshold: tolerance for distance equivalence, used
                 as input to in_coord_list_pbc for dupl. checking
         """
-        surf_sg = SpacegroupAnalyzer(self.slab, 0.1)
-        symm_ops = surf_sg.get_symmetry_operations()
-        unique_coords = []
-        # Convert to fractional
-        coords_set = [self.slab.lattice.get_fractional_coords(coords)
-                      for coords in coords_set]
-        for coords in coords_set:
-            incoord = False
-            for op in symm_ops:
-                if in_coord_list_pbc(unique_coords, op.operate(coords),
-                                     atol=threshold):
-                    incoord = True
-                    break
-            if not incoord:
-                unique_coords += [coords]
-        # convert back to cartesian
-        return [self.slab.lattice.get_cartesian_coords(coords)
-                for coords in unique_coords]
+        ads_decorated_structure = self.slab.copy()
+
+        # Add dummy adsorption sites
+        for coord in coords_set:
+            ads_decorated_structure.append(
+                DummySpecie("Ads"), coord, coords_are_cartesian=True)
+
+        # Analyze symmetry of adsorption decorated slab
+        ads_sg = SpacegroupAnalyzer(ads_decorated_structure, 0.1)
+
+        # Get unique coordinates
+        unique_indices = set(ads_sg.get_symmetry_dataset()['equivalent_atoms'])
+        unique_sites = [ads_decorated_structure[i] for i in unique_indices
+                        if i >= len(self.slab)]
+        # import nose; nose.tools.set_trace()
+        return [site.coords for site in unique_sites]
 
     def near_reduce(self, coords_set, threshold=1e-4):
         """
@@ -424,7 +423,6 @@ class AdsorbateSiteFinder:
         Args:
             slab (Slab): slab for which to assign selective dynamics
         """
-        sd_list = []
         sd_list = [[False, False, False] if site.properties['surface_properties'] == 'subsurface'
                    else [True, True, True] for site in slab.sites]
         new_sp = slab.site_properties
@@ -649,6 +647,7 @@ def plot_slab(slab, ax, scale=0.8, repeat=5, window=1.5,
             a fraction of the unit cell limits
         draw_unit_cell (bool): flag indicating whether or not to draw cell
         decay (float): how the alpha-value decays along the z-axis
+        adsorption_sites (bool): whether to plot adsorption sites
     """
     orig_slab = slab.copy()
     slab = reorient_z(slab)
@@ -691,7 +690,7 @@ def plot_slab(slab, ax, scale=0.8, repeat=5, window=1.5,
         verts = [(np.array(vert) + corner).tolist() for vert in verts]
         path = Path(verts, codes)
         patch = patches.PathPatch(path, facecolor='none', lw=2,
-                                  alpha=0.5, zorder=2 * n + 2)
+                                  alpha=0.5, zorder=2 * len(coords) + 2)
         ax.add_patch(patch)
     ax.set_aspect("equal")
     center = corner + lattsum / 2.
